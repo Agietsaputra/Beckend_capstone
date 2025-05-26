@@ -1,147 +1,144 @@
 import os
 import datetime
-import jwt
 from flask import Flask, request, jsonify
 from flask_bcrypt import Bcrypt
-from pymongo import MongoClient
+from flask_pymongo import PyMongo
+from flask_jwt_extended import (
+    JWTManager, create_access_token, jwt_required, get_jwt_identity
+)
 from bson.objectid import ObjectId
 from flask_cors import CORS
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 from werkzeug.utils import secure_filename
+from dotenv import load_dotenv
 
-# Konfigurasi
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
-SECRET_KEY = os.getenv("SECRET_KEY", "your_jwt_secret")
+load_dotenv()
+
+MONGO_URI = "mongodb+srv://Bigdata:capstone66@cluster0.nplyvzs.mongodb.net/smartdb?retryWrites=true&w=majority&appName=Cluster0"
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your_secret_key")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "your_google_client_id")
 UPLOAD_FOLDER = 'uploads/videos'
 
-# Inisialisasi
 app = Flask(__name__)
-bcrypt = Bcrypt(app)
-client = MongoClient(MONGO_URI)
-db = client["smartstrech"]
-users_collection = db["users"]
+app.config["MONGO_URI"] = MONGO_URI
+app.config["JWT_SECRET_KEY"] = JWT_SECRET_KEY
+app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 
+mongo = PyMongo(app)
+bcrypt = Bcrypt(app)
+jwt = JWTManager(app)
 CORS(app, supports_credentials=True)
 
-# Helper Functions
-def hash_password(password):
-    return bcrypt.generate_password_hash(password).decode('utf-8')
+users_collection = mongo.db.users
 
-def check_password(password, hashed):
-    return bcrypt.check_password_hash(hashed, password)
+# Error handlers
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({"message": "Resource not found"}), 404
 
-def generate_token(user_id):
-    payload = {
-        "user_id": str(user_id),
-        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=24)
-    }
-    return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+@app.errorhandler(405)
+def method_not_allowed(error):
+    return jsonify({"message": "Method not allowed"}), 405
 
-def verify_token(token):
-    try:
-        decoded = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-        return decoded["user_id"]
-    except jwt.ExpiredSignatureError:
-        return None
-    except jwt.InvalidTokenError:
-        return None
+@app.errorhandler(500)
+def internal_error(error):
+    app.logger.error(f"Server error: {error}")
+    return jsonify({"message": "Internal server error"}), 500
 
 # Register
 @app.route("/register", methods=["POST"])
 def register():
-    data = request.get_json()
-    name = data.get("name")
-    email = data.get("email")
-    password = data.get("password")
+    try:
+        data = request.get_json()
+        username = data.get("username")
+        email = data.get("email")
+        password = data.get("password")
 
-    if not name or not email or not password:
-        return jsonify({"message": "Name, email, and password are required"}), 400
+        if not email or not password or not username:
+            return jsonify({"message": "Username, email, and password are required"}), 400
 
-    if users_collection.find_one({"email": email}):
-        return jsonify({"message": "Email already exists"}), 400
+        if users_collection.find_one({"email": email}):
+            return jsonify({"message": "User already exists"}), 409
 
-    if users_collection.find_one({"name": name}):
-        return jsonify({"message": "Name already exists"}), 400
+        hashed_password = bcrypt.generate_password_hash(password).decode("utf-8")
 
-    hashed_pw = hash_password(password)
-    result = users_collection.insert_one({
-        "name": name,
-        "email": email,
-        "password": hashed_pw,
-        "created_at": datetime.datetime.utcnow()
-    })
+        new_user = {
+            "username": username,
+            "email": email,
+            "password": hashed_password,
+            "created_at": datetime.datetime.utcnow(),
+            "name": username,
+        }
 
-    return jsonify({
-        "message": "User registered successfully",
-        "user_id": str(result.inserted_id)
-    }), 201
+        users_collection.insert_one(new_user)
 
-# Login Manual
+        return jsonify({"message": "User registered successfully"}), 201
+    except Exception as e:
+        app.logger.error(f"Error on /register: {e}")
+        return jsonify({"message": "Failed to register user"}), 500
+
+# Login
 @app.route("/login", methods=["POST"])
 def login():
-    data = request.get_json()
-    identifier = data.get("identifier")
-    password = data.get("password")
+    try:
+        data = request.get_json()
+        email = data.get("email")
+        password = data.get("password")
 
-    if not identifier or not password:
-        return jsonify({"message": "Identifier and password required"}), 400
+        user = users_collection.find_one({"email": email})
+        if not user or not bcrypt.check_password_hash(user["password"], password):
+            return jsonify({"message": "Invalid email or password"}), 401
 
-    user = users_collection.find_one({
-        "$or": [
-            {"email": identifier},
-            {"name": identifier}
-        ]
-    })
+        access_token = create_access_token(identity=str(user["_id"]), expires_delta=datetime.timedelta(hours=1))
 
-    if not user or not user.get("password") or not check_password(password, user["password"]):
-        return jsonify({"message": "Invalid credentials"}), 401
+        user_data = {
+            "id": str(user["_id"]),
+            "username": user.get("username"),
+            "email": user.get("email"),
+            "created_at": user.get("created_at").strftime('%Y-%m-%d %H:%M:%S')
+        }
 
-    token = generate_token(user["_id"])
-    return jsonify({
-        "token": token,
-        "user_name": user.get("name"),
-        "email": user.get("email")
-    }), 200
+        return jsonify({"access_token": access_token, "data": user_data, "message": "Login successful"}), 200
+    except Exception as e:
+        app.logger.error(f"Error on /login: {e}")
+        return jsonify({"message": "Login failed"}), 500
 
 # Login Basic Auth
 @app.route("/login/basic", methods=["POST"])
 def login_basic():
-    auth = request.authorization
-    if not auth or not auth.username or not auth.password:
-        return jsonify({"message": "Missing credentials"}), 400
+    try:
+        auth = request.authorization
+        if not auth or not auth.username or not auth.password:
+            return jsonify({"message": "Missing credentials"}), 400
 
-    identifier = auth.username
-    password = auth.password
+        identifier = auth.username
+        password = auth.password
 
-    user = users_collection.find_one({
-        "$or": [
-            {"email": identifier},
-            {"name": identifier}
-        ]
-    })
+        user = users_collection.find_one({
+            "$or": [{"email": identifier}, {"username": identifier}]
+        })
 
-    if not user or not user.get("password") or not check_password(password, user["password"]):
-        return jsonify({"message": "Invalid credentials"}), 401
+        if not user or not user.get("password") or not bcrypt.check_password_hash(user["password"], password):
+            return jsonify({"message": "Invalid credentials"}), 401
 
-    token = generate_token(user["_id"])
-    return jsonify({"token": token, "user_name": user.get("name")}), 200
+        token = create_access_token(identity=str(user["_id"]), expires_delta=datetime.timedelta(hours=1))
+        return jsonify({"token": token, "user_name": user.get("name")}), 200
+    except Exception as e:
+        app.logger.error(f"Error on /login/basic: {e}")
+        return jsonify({"message": "Basic login failed"}), 500
 
 # Login Google
 @app.route("/login/google", methods=["POST"])
 def login_google():
-    data = request.get_json()
-    token = data.get("token")
-
-    if not token:
-        return jsonify({"message": "Missing Google token"}), 400
-
     try:
-        idinfo = id_token.verify_oauth2_token(
-            token, google_requests.Request(), GOOGLE_CLIENT_ID
-        )
+        data = request.get_json()
+        token = data.get("token")
 
+        if not token:
+            return jsonify({"message": "Missing Google token"}), 400
+
+        idinfo = id_token.verify_oauth2_token(token, google_requests.Request(), GOOGLE_CLIENT_ID)
         email = idinfo["email"]
         name = idinfo.get("name")
         picture = idinfo.get("picture")
@@ -150,8 +147,9 @@ def login_google():
         if not user:
             result = users_collection.insert_one({
                 "email": email,
-                "password": None,
                 "name": name,
+                "username": email.split("@")[0],
+                "password": None,
                 "picture": picture,
                 "created_at": datetime.datetime.utcnow()
             })
@@ -159,147 +157,142 @@ def login_google():
         else:
             user_id = user["_id"]
 
-        jwt_token = generate_token(user_id)
+        jwt_token = create_access_token(identity=str(user_id), expires_delta=datetime.timedelta(hours=1))
         return jsonify({"token": jwt_token}), 200
-
     except ValueError:
         return jsonify({"message": "Invalid Google token"}), 400
+    except Exception as e:
+        app.logger.error(f"Error on /login/google: {e}")
+        return jsonify({"message": "Google login failed"}), 500
 
-# Get Profile
+# Profile - GET
 @app.route("/profile", methods=["GET"])
+@jwt_required()
 def get_profile():
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        return jsonify({"message": "Missing or invalid token"}), 401
+    try:
+        user_id = get_jwt_identity()
+        user = users_collection.find_one({"_id": ObjectId(user_id)})
 
-    token = auth_header.split(" ")[1]
-    user_id = verify_token(token)
-    if not user_id:
-        return jsonify({"message": "Token is invalid or expired"}), 401
+        if not user:
+            return jsonify({"message": "User not found"}), 404
 
-    user = users_collection.find_one({"_id": ObjectId(user_id)})
-    if not user:
-        return jsonify({"message": "User not found"}), 404
+        profile = {
+            "user_id": str(user["_id"]),
+            "email": user.get("email"),
+            "name": user.get("name", ""),
+            "phone": user.get("phone", ""),
+            "username": user.get("username", ""),
+            "gender": user.get("gender", ""),
+            "picture": user.get("picture", "")
+        }
+        return jsonify(profile), 200
+    except Exception as e:
+        app.logger.error(f"Error on /profile GET: {e}")
+        return jsonify({"message": "Failed to fetch profile"}), 500
 
-    return jsonify({
-        "user_id": str(user["_id"]),
-        "email": user["email"],
-        "name": user.get("name"),
-        "picture": user.get("picture")
-    }), 200
-
-# Update Profile
+# Profile - PUT
 @app.route("/profile", methods=["PUT"])
+@jwt_required()
 def update_profile():
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        return jsonify({"message": "Missing or invalid token"}), 401
+    try:
+        user_id = get_jwt_identity()
+        data = request.get_json()
 
-    token = auth_header.split(" ")[1]
-    user_id = verify_token(token)
-    if not user_id:
-        return jsonify({"message": "Invalid or expired token"}), 401
+        if not data:
+            return jsonify({"message": "No data provided"}), 400
 
-    data = request.get_json()
-    new_email = data.get("email")
-    new_password = data.get("password")
-    new_name = data.get("name")
-    new_picture = data.get("picture")
+        update_data = {}
 
-    update_data = {}
+        if "email" in data:
+            email = data["email"].strip()
+            if users_collection.find_one({"email": email, "_id": {"$ne": ObjectId(user_id)}}):
+                return jsonify({"message": "Email already in use"}), 400
+            update_data["email"] = email
 
-    if new_email and new_email.strip() != "":
-        if users_collection.find_one({"email": new_email, "_id": {"$ne": ObjectId(user_id)}}):
-            return jsonify({"message": "Email already in use"}), 400
-        update_data["email"] = new_email.strip()
+        if "password" in data and data["password"]:
+            update_data["password"] = bcrypt.generate_password_hash(data["password"]).decode("utf-8")
 
-    if new_password and new_password.strip() != "":
-        update_data["password"] = hash_password(new_password.strip())
+        if "name" in data:
+            update_data["name"] = data["name"].strip()
 
-    if new_name and new_name.strip() != "":
-        update_data["name"] = new_name.strip()
+        if "phone" in data:
+            update_data["phone"] = data["phone"].strip()
 
-    if new_picture and new_picture.strip() != "":
-        update_data["picture"] = new_picture.strip()
+        if "username" in data:
+            update_data["username"] = data["username"].strip()
 
-    if not update_data:
-        return jsonify({"message": "No data to update"}), 400
+        if "gender" in data:
+            update_data["gender"] = data["gender"].strip()
 
-    users_collection.update_one(
-        {"_id": ObjectId(user_id)},
-        {"$set": update_data}
-    )
+        if not update_data:
+            return jsonify({"message": "No valid data to update"}), 400
 
-    return jsonify({"message": "Profile updated successfully"}), 200
+        users_collection.update_one({"_id": ObjectId(user_id)}, {"$set": update_data})
+        return jsonify({"message": "Profile updated successfully"}), 200
+    except Exception as e:
+        app.logger.error(f"Error on /profile PUT: {e}")
+        return jsonify({"message": "Failed to update profile"}), 500
 
-# Update Nama
-@app.route("/profile/name", methods=["PUT"])
-def update_name():
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        return jsonify({"message": "Missing or invalid token"}), 401
-
-    token = auth_header.split(" ")[1]
-    user_id = verify_token(token)
-    if not user_id:
-        return jsonify({"message": "Invalid or expired token"}), 401
-
-    data = request.get_json()
-    new_name = data.get("name")
-
-    if not new_name:
-        return jsonify({"message": "Name is required"}), 400
-
-    users_collection.update_one(
-        {"_id": ObjectId(user_id)},
-        {"$set": {"name": new_name}}
-    )
-
-    return jsonify({"message": "Name updated successfully"}), 200
-
-# Delete Account
+# Delete account
 @app.route("/profile", methods=["DELETE"])
+@jwt_required()
 def delete_account():
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        return jsonify({"message": "Missing or invalid token"}), 401
+    try:
+        user_id = get_jwt_identity()
+        users_collection.delete_one({"_id": ObjectId(user_id)})
+        return jsonify({"message": "Account deleted"}), 200
+    except Exception as e:
+        app.logger.error(f"Error on /profile DELETE: {e}")
+        return jsonify({"message": "Failed to delete account"}), 500
 
-    token = auth_header.split(" ")[1]
-    user_id = verify_token(token)
-    if not user_id:
-        return jsonify({"message": "Invalid or expired token"}), 401
-
-    users_collection.delete_one({"_id": ObjectId(user_id)})
-    return jsonify({"message": "Account deleted"}), 200
+# Refresh token
+@app.route("/refresh-token", methods=["POST"])
+@jwt_required()
+def refresh_token():
+    try:
+        user_id = get_jwt_identity()
+        new_token = create_access_token(identity=user_id)
+        return jsonify({"token": new_token}), 200
+    except Exception as e:
+        app.logger.error(f"Error on /refresh-token: {e}")
+        return jsonify({"message": "Failed to refresh token"}), 500
 
 # Upload Video
 @app.route("/upload-video", methods=["POST"])
 def upload_video():
-    if 'video' not in request.files:
-        return jsonify({'message': 'No video file provided'}), 400
+    try:
+        if 'video' not in request.files:
+            return jsonify({'message': 'No video file provided'}), 400
 
-    video = request.files['video']
-    filename = secure_filename(video.filename)
+        video = request.files['video']
+        filename = secure_filename(video.filename)
 
-    if not os.path.exists(UPLOAD_FOLDER):
-        os.makedirs(UPLOAD_FOLDER)
+        os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+        video.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
 
-    save_path = os.path.join(UPLOAD_FOLDER, filename)
-    video.save(save_path)
+        return jsonify({'message': 'Video uploaded successfully', 'filename': filename}), 200
+    except Exception as e:
+        app.logger.error(f"Error on /upload-video: {e}")
+        return jsonify({'message': 'Failed to upload video'}), 500
 
-    return jsonify({'message': 'Video uploaded successfully', 'filename': filename}), 200
-
-# Send Detection
+# Receive Detection Data
 @app.route("/send-detection", methods=["POST"])
 def receive_detection():
-    data = request.json
+    try:
+        data = request.json
+        if not data:
+            return jsonify({'message': 'No data received'}), 400
 
-    if not data:
-        return jsonify({'message': 'No data received'}), 400
+        app.logger.info(f"Received detection data: {data}")
+        return jsonify({'message': 'Detection data received successfully'}), 200
+    except Exception as e:
+        app.logger.error(f"Error on /send-detection: {e}")
+        return jsonify({'message': 'Failed to process detection data'}), 500
 
-    print("Received detection data:", data)
-    # Kamu bisa simpan ke MongoDB jika dibutuhkan
-    return jsonify({'message': 'Detection data received successfully'}), 200
+# Root
+@app.route("/", methods=["GET"])
+def hello():
+    return jsonify({"msg": "API is ready"}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
