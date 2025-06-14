@@ -260,6 +260,99 @@ def login_google():
         logging.exception("Unexpected error during Google login:")
         return jsonify({"message": "Google login failed", "error": str(e)}), 500
 
+# ================= RESET PASSWORD =================
+@app.route("/reset-password", methods=["POST"])
+def reset_password():
+    try:
+        data = request.get_json()
+        email = data.get("email")
+        new_password = data.get("new_password")
+
+        if not email or not new_password:
+            return jsonify({"message": "Email dan password baru wajib diisi"}), 400
+
+        user = users_collection.find_one({"email": email})
+        if not user:
+            return jsonify({"message": "User tidak ditemukan"}), 404
+
+        if not user.get("reset_verified"):
+            return jsonify({"message": "Reset OTP belum diverifikasi"}), 403
+
+        hashed_password = bcrypt.generate_password_hash(new_password).decode("utf-8")
+        users_collection.update_one(
+            {"_id": user["_id"]},
+            {"$set": {"password": hashed_password}, "$unset": {"reset_verified": ""}}
+        )
+
+        return jsonify({"message": "Password berhasil direset"}), 200
+
+    except Exception as e:
+        app.logger.error(f"Error on /reset-password: {e}")
+        return jsonify({"message": "Gagal mereset password"}), 500
+    
+@app.route("/request-otp-reset", methods=["POST"])
+def request_otp_reset():
+    try:
+        data = request.get_json()
+        email = data.get("email")
+
+        if not email:
+            return jsonify({"message": "Email diperlukan"}), 400
+
+        user = users_collection.find_one({"email": email})
+        if not user:
+            return jsonify({"message": "User tidak ditemukan"}), 404
+
+        otp = generate_otp()
+        expiry = datetime.utcnow() + timedelta(minutes=10)
+
+        users_collection.update_one(
+            {"_id": user["_id"]},
+            {"$set": {
+                "reset_otp": otp,
+                "reset_otp_expiry": expiry
+            }}
+        )
+
+        send_otp_email(email, otp)
+        return jsonify({"message": "OTP untuk reset password telah dikirim ke email"}), 200
+
+    except Exception as e:
+        app.logger.error(f"Error on /request-otp-reset: {e}")
+        return jsonify({"message": "Gagal mengirim OTP reset password"}), 500
+
+
+@app.route("/verify-otp-reset", methods=["POST"])
+def verify_otp_reset():
+    try:
+        data = request.get_json()
+        email = data.get("email")
+        otp_input = data.get("otp")
+
+        if not email or not otp_input:
+            return jsonify({"message": "Email dan OTP wajib diisi"}), 400
+
+        user = users_collection.find_one({"email": email})
+        if not user:
+            return jsonify({"message": "User tidak ditemukan"}), 404
+
+        if datetime.utcnow() > user.get("reset_otp_expiry", datetime.utcnow()):
+            return jsonify({"message": "OTP telah kedaluwarsa"}), 400
+
+        if str(user.get("reset_otp")) != str(otp_input):
+            return jsonify({"message": "Kode OTP salah"}), 401
+
+        users_collection.update_one(
+            {"_id": user["_id"]},
+            {"$set": {"reset_verified": True}, "$unset": {"reset_otp": "", "reset_otp_expiry": ""}}
+        )
+
+        return jsonify({"message": "OTP valid, lanjutkan reset password"}), 200
+
+    except Exception as e:
+        app.logger.error(f"Error on /verify-otp-reset: {e}")
+        return jsonify({"message": "Verifikasi OTP reset gagal"}), 500
+
 # ================= PROFILE =================
 @app.route("/profile", methods=["GET"])
 @jwt_required()
@@ -410,6 +503,11 @@ def upload_profile_picture():
         app.logger.error(f"Error on /profile/picture: {e}")
         return jsonify({"message": "Gagal mengunggah foto profil"}), 500
 
+@app.route('/', methods=['GET'])
+def hello():
+    return jsonify({
+        "msg": "Halloo Sayang...."
+    })
 
 if __name__ == "__main__":
     app.run(debug=True)
