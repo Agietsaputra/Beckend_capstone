@@ -353,6 +353,52 @@ def verify_otp_reset():
         app.logger.error(f"Error on /verify-otp-reset: {e}")
         return jsonify({"message": "Verifikasi OTP reset gagal"}), 500
 
+@app.route("/riwayat-lari", methods=["POST"])
+@jwt_required()
+def tambah_riwayat_lari():
+    try:
+        user_id = get_jwt_identity()
+        data = request.get_json()
+
+        durasi = data.get("durasi")  # dalam detik
+        jarak = data.get("jarak")    # dalam kilometer
+
+        if durasi is None or jarak is None:
+            return jsonify({"message": "Durasi dan jarak wajib diisi"}), 400
+
+        entri_baru = {
+            "tanggal": datetime.utcnow(),
+            "durasi": durasi,
+            "jarak": jarak
+        }
+
+        users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$push": {"riwayat_lari": entri_baru}}
+        )
+
+        return jsonify({"message": "Riwayat lari berhasil disimpan"}), 200
+
+    except Exception as e:
+        app.logger.error(f"Error on /riwayat-lari POST: {e}")
+        return jsonify({"message": "Gagal menyimpan riwayat lari"}), 500
+
+@app.route("/riwayat-lari", methods=["GET"])
+@jwt_required()
+def ambil_riwayat_lari():
+    try:
+        user_id = get_jwt_identity()
+        user = users_collection.find_one({"_id": ObjectId(user_id)})
+
+        if not user:
+            return jsonify({"message": "User tidak ditemukan"}), 404
+
+        return jsonify({"riwayat_lari": user.get("riwayat_lari", [])}), 200
+
+    except Exception as e:
+        app.logger.error(f"Error on /riwayat-lari GET: {e}")
+        return jsonify({"message": "Gagal mengambil riwayat lari"}), 500
+    
 # ================= PROFILE =================
 @app.route("/profile", methods=["GET"])
 @jwt_required()
