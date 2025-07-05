@@ -375,6 +375,32 @@ def pemanasan_selesai():
     except Exception as e:
         app.logger.error(f"Error on /pemanasan-selesai: {e}")
         return jsonify({"message": "Gagal menyimpan tanggal pemanasan"}), 500
+    
+@app.route("/gerakan-pemanasan", methods=["POST"])
+@jwt_required()
+def simpan_gerakan_pemanasan():
+    try:
+        user_id = get_jwt_identity()
+        data = request.get_json()
+        nama_gerakan = data.get("nama_gerakan")
+        waktu = data.get("waktu")
+
+        if not nama_gerakan or not waktu:
+            return jsonify({"message": "Data tidak lengkap"}), 400
+
+        users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$push": {
+                "gerakan_pemanasan": {
+                    "nama": nama_gerakan,
+                    "waktu": waktu
+                }
+            }}
+        )
+
+        return jsonify({"message": "Gerakan pemanasan berhasil disimpan"}), 200
+    except Exception as e:
+        return jsonify({"message": f"Gagal menyimpan gerakan: {str(e)}"}), 500
 
 
 @app.route("/riwayat-lari", methods=["POST"])
@@ -394,11 +420,20 @@ def tambah_riwayat_lari():
         if rute and not isinstance(rute, list):
             return jsonify({"message": "Format rute tidak valid"}), 400
 
+        # Ambil data user
+        user = users_collection.find_one({"_id": ObjectId(user_id)})
+        if not user:
+            return jsonify({"message": "User tidak ditemukan"}), 404
+
+        # Cek apakah sudah pemanasan hari ini
+        if not sudah_pemanasan_hari_ini(user):
+            return jsonify({"message": "Kamu belum menyelesaikan pemanasan hari ini"}), 403
+
         entri_baru = {
             "tanggal": datetime.utcnow(),
             "durasi": durasi,
             "jarak": jarak,
-            "rute": rute or []  # rute disimpan sebagai list kosong jika tidak dikirim
+            "rute": rute or []
         }
 
         users_collection.update_one(
@@ -411,6 +446,7 @@ def tambah_riwayat_lari():
     except Exception as e:
         app.logger.error(f"Error on /riwayat-lari POST: {e}")
         return jsonify({"message": "Gagal menyimpan riwayat lari"}), 500
+
 
 @app.route("/riwayat-lari", methods=["GET"])
 @jwt_required()
