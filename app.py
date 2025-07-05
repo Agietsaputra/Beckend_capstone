@@ -362,14 +362,19 @@ def tambah_riwayat_lari():
 
         durasi = data.get("durasi")  # dalam detik
         jarak = data.get("jarak")    # dalam kilometer
+        rute = data.get("rute")      # daftar titik (opsional)
 
         if durasi is None or jarak is None:
             return jsonify({"message": "Durasi dan jarak wajib diisi"}), 400
 
+        if rute and not isinstance(rute, list):
+            return jsonify({"message": "Format rute tidak valid"}), 400
+
         entri_baru = {
             "tanggal": datetime.utcnow(),
             "durasi": durasi,
-            "jarak": jarak
+            "jarak": jarak,
+            "rute": rute or []  # rute disimpan sebagai list kosong jika tidak dikirim
         }
 
         users_collection.update_one(
