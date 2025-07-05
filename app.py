@@ -353,6 +353,30 @@ def verify_otp_reset():
         app.logger.error(f"Error on /verify-otp-reset: {e}")
         return jsonify({"message": "Verifikasi OTP reset gagal"}), 500
 
+@app.route("/pemanasan-selesai", methods=["POST"])
+@jwt_required()
+def pemanasan_selesai():
+    try:
+        user_id = get_jwt_identity()
+        data = request.get_json()
+        tanggal = data.get("tanggal_selesai")
+
+        if not tanggal:
+            return jsonify({"message": "Tanggal tidak boleh kosong"}), 400
+
+        # Simpan tanggal selesai pemanasan ke profil user
+        users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": {"tanggal_pemanasan_selesai": tanggal}}
+        )
+
+        return jsonify({"message": "Tanggal pemanasan berhasil disimpan"}), 200
+
+    except Exception as e:
+        app.logger.error(f"Error on /pemanasan-selesai: {e}")
+        return jsonify({"message": "Gagal menyimpan tanggal pemanasan"}), 500
+
+
 @app.route("/riwayat-lari", methods=["POST"])
 @jwt_required()
 def tambah_riwayat_lari():
